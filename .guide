@@ -1,0 +1,142 @@
+# Docker build and push instructions
+# PowerShell (Windows)
+
+> Run these in the repo root.
+
+**1) Create a tag and push it (optional if you’re not using GitHub Actions):**
+
+```powershell
+git tag v0.1.0
+git push --tags
+```
+
+**2) Log in to GHCR:**
+
+```powershell
+$env:GHCR_USER="knowusuboaky"
+$env:GHCR_TOKEN="<YOUR_GHCR_PAT>"   # scopes: read:packages, write:packages
+$env:GHCR_TOKEN | docker login ghcr.io -u $env:GHCR_USER --password-stdin
+```
+
+**3) Ensure a Buildx builder exists and select it:**
+
+```powershell
+$BUILDER = "unified_embeddings_builder"
+
+if (-not (docker buildx ls | Select-String -Quiet "\b$BUILDER\b")) {
+  docker buildx create --name $BUILDER --use | Out-Null
+} else {
+  docker buildx use $BUILDER
+}
+```
+
+**4) Build multi-arch (amd64 + arm64) and PUSH to GHCR (CPU image):**
+
+```powershell
+$IMAGE="ghcr.io/knowusuboaky/unified_embeddings"
+
+docker buildx build `
+  -f Dockerfile `
+  --platform linux/amd64,linux/arm64 `
+  -t $IMAGE`:0.1.0 `
+  -t $IMAGE`:latest `
+  --push `
+  .
+```
+
+**(Optional) 5) Build & push a CUDA tag:**
+
+```powershell
+$IMAGE="ghcr.io/knowusuboaky/unified_embeddings"
+
+docker buildx build `
+  -f Dockerfile `
+  --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cu121 `
+  --platform linux/amd64 `
+  -t $IMAGE`:cuda-0.1.0 `
+  -t $IMAGE`:cuda `
+  --push `
+  .
+```
+
+---
+
+# Bash (Linux/macOS/WSL)
+
+**1) Tag and push (optional if Actions handles the build):**
+
+```bash
+git tag v0.1.0
+git push --tags
+```
+
+**2) Log in to GHCR:**
+
+```bash
+export GHCR_USER=knowusuboaky
+export GHCR_TOKEN=<YOUR_GHCR_PAT>   # scopes: read:packages, write:packages
+echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+```
+
+**3) Buildx builder:**
+
+```bash
+docker buildx create --use --name ubuilder || docker buildx use ubuilder
+```
+
+**4) Build multi-arch and PUSH (CPU image):**
+
+```bash
+IMAGE=ghcr.io/knowusuboaky/unified_embeddings
+docker buildx build \
+  -f Dockerfile \
+  --platform linux/amd64,linux/arm64 \
+  -t $IMAGE:0.1.0 -t $IMAGE:latest \
+  --push .
+```
+
+**(Optional) 5) CUDA tag:**
+
+```bash
+IMAGE=ghcr.io/knowusuboaky/unified_embeddings
+docker buildx build \
+  -f Dockerfile \
+  --build-arg BASE_IMAGE=pytorch/pytorch:2.4.0-cuda12.1-cudnn8-runtime \
+  --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cu121 \
+  --platform linux/amd64 \
+  -t $IMAGE:cuda-0.1.0 -t $IMAGE:cuda \
+  --push .
+```
+
+---
+
+## Quick checks after push
+
+```bash
+docker pull ghcr.io/knowusuboaky/unified_embeddings:latest
+docker run --rm -p 9005:9005 ghcr.io/knowusuboaky/unified_embeddings:latest
+# open http://localhost:9005/__docs__
+```
+
+> If pulls require auth, set the package visibility to **Public** in GitHub → Repo → **Packages** → `unified_embeddings` → **Package settings**.
+
+<!-- 
+######################################## IF YOU FORGOT TO TAG BEFORE PUSHING :latest ########################################
+# 1) Log in to GHCR
+$env:GHCR_USER="knowusuboaky"
+$env:GHCR_TOKEN="<YOUR_PAT_WITH_write:packages>"
+$env:GHCR_TOKEN | docker login ghcr.io -u $env:GHCR_USER --password-stdin
+
+# 2) (Optional) see what’s there
+docker buildx imagetools inspect ghcr.io/knowusuboaky/unified_embeddings:latest
+
+# 3) Retag the existing :latest to a version tag (no rebuild)
+$IMAGE="ghcr.io/knowusuboaky/unified_embeddings"
+$VER="0.1.0"   # change as needed
+
+docker buildx imagetools create `
+  --tag $IMAGE`:$VER `
+  $IMAGE`:latest
+
+docker buildx imagetools create --tag $IMAGE`:cuda-$VER $IMAGE`:cuda
+ -->
