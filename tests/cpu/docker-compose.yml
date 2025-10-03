@@ -1,0 +1,14 @@
+services:
+  embeddings:
+    image: ghcr.io/knowusuboaky/unified_embeddings:latest
+    ports:
+      - "9005:9005"
+    environment:
+      - HF_HOME=/root/.cache/huggingface
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    restart: unless-stopped
+    pull_policy: if_not_present
+
+volumes:
+  hf-cache:
