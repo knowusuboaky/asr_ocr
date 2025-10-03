@@ -1,14 +1,20 @@
 services:
-  embeddings:
-    image: ghcr.io/knowusuboaky/unified_embeddings:latest
+  asr_ocr:
+    image: ghcr.io/knowusuboaky/asr_ocr:latest   # CPU image
     ports:
-      - "9005:9005"
+      - "9002:9002"
     environment:
-      - HF_HOME=/root/.cache/huggingface
+      - HF_HOME=/root/.cache/huggingface         # Hugging Face cache
+      - TRANSFORMERS_CACHE=/root/.cache/huggingface
+      # Optional tuning:
+      # - ASR_MODEL=large-v3
+      # - OCR_LANGS=en
     volumes:
-      - hf-cache:/root/.cache/huggingface
+      - hf-cache:/root/.cache/huggingface        # faster-whisper / HF cache
+      - easyocr-cache:/root/.EasyOCR             # EasyOCR model cache
     restart: unless-stopped
     pull_policy: if_not_present
 
 volumes:
   hf-cache:
+  easyocr-cache:
