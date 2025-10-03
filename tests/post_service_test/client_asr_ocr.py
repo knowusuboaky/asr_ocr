@@ -147,3 +147,35 @@ def transcribe_url(url: str, out_md: Path = Path("transcript_from_url.md"), *, u
         return False
     _save_text(out_md, r.text)
     return True
+
+# -------------------- Quick examples (comment out if importing) --------------------
+# Ensure your server is running, e.g.:
+# uvicorn transcribe_server:app --host 0.0.0.0 --port 9002
+#
+# -------------------- Quick examples (comment out if importing) --------------------
+# Ensure your server is running, e.g.:
+#  uvicorn transcribe_server:app --host 0.0.0.0 --port 9002
+
+# Examples:
+ok = transcribe_file(Path("video.mp4"), Path("video_transcript.md"))
+print("file->md:", "OK" if ok else "FAILED")
+
+ok = transcribe_image(Path("example.png"), Path("example_ocr.md"))
+print("image->md:", "OK" if ok else "FAILED")
+
+# Direct media URL (audio/video):
+ok = transcribe_url("https://download.samplelib.com/mp4/sample-5s.mp4", Path("remote_media.md"))
+print("url(media)->md:", "OK" if ok else "FAILED")
+
+# Direct image URL:
+ok = transcribe_url("https://upload.wikimedia.org/wikipedia/commons/8/81/Stop_sign.png",
+                    Path("remote_image_ocr.md"))
+print("url(image)->md:", "OK" if ok else "FAILED")
+
+# Single HTML page (no crawl) — extracts page text into Markdown:
+ok = transcribe_url("https://www.python.org", Path("python_org.md"))
+print("url(html)->md:", "OK" if ok else "FAILED")
+
+# Optional: custom user-agent if a site blocks default:
+ok = transcribe_url("https://example.com/some-media", Path("custom_ua.md"))
+print("url(with UA)->md:", "OK" if ok else "FAILED")
