@@ -8,7 +8,8 @@ set -euo pipefail
 
 ACTION="${1:-smoke}"
 COMPOSE="docker compose -f tests/gpu/docker-compose.yml"
-BASE_URL="http://localhost:9005"
+BASE_URL="http://localhost:9002"     # asr_ocr listens on 9002
+SERVICE_NAME="asr_ocr"
 JQ="$(command -v jq || echo cat)"
 
 check_nvidia() {
@@ -21,12 +22,12 @@ check_nvidia() {
 wait_healthy() {
   echo "Waiting for service to become healthy (timeout 300s)..."
   SECS=0
-  until curl -fsS "$BASE_URL/healthz" >/dev/null 2>&1; do
+  until curl -fsS "$BASE_URL/health" >/dev/null 2>&1; do  # /health returns plain 'ok'
     sleep 3
     SECS=$((SECS+3))
     if [ "$SECS" -ge 300 ]; then
       echo "ERROR: Service did not become healthy in time."
-      $COMPOSE logs --no-color embeddings || true
+      $COMPOSE logs --no-color "$SERVICE_NAME" || true
       exit 1
     fi
   done
@@ -51,13 +52,13 @@ case "$ACTION" in
     $COMPOSE up -d
     wait_healthy
 
-    echo "Models:"
-    curl -fsS "$BASE_URL/models" | $JQ .
+    echo "Root summary:"
+    curl -fsS "$BASE_URL/" | sed -e 's/^/  /'
 
-    echo "Embedding test (GPU):"
-    curl -fsS -X POST "$BASE_URL/embed?model=e5-large-v2" \
+    echo "HTML extract test (example.com):"
+    curl -fsS -X POST "$BASE_URL/transcribe_url" \
       -H "Content-Type: application/json" \
-      -d '{"texts":["hello gpu"],"mode":"auto"}' | $JQ .
+      -d '{"url":"https://example.com"}' | head -n 30
 
     # bring everything down after the test
     $COMPOSE down -v
