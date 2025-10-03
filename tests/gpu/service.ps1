@@ -8,7 +8,7 @@
 # Notes:
 #   - Requires NVIDIA drivers + nvidia-container-toolkit (Docker GPU runtime).
 #   - Compose file: tests/gpu/docker-compose.yml
-#   - API: http://localhost:9005
+#   - API: http://localhost:9002
 
 param(
   [ValidateSet('up','down')]
@@ -17,7 +17,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $compose = "docker compose -f tests/gpu/docker-compose.yml"
-$baseUrl = "http://localhost:9005"
+$baseUrl = "http://localhost:9002"   # asr_ocr runs on 9002
 
 if ($Action -eq 'up') {
   # Verify NVIDIA runtime
@@ -30,13 +30,13 @@ if ($Action -eq 'up') {
   # Start container (detached)
   iex "$compose up -d"
 
-  # Wait until /healthz returns ok:true (max ~5 min)
+  # Wait until /health returns 'ok' (max ~5 min)
   $deadline = (Get-Date).AddMinutes(5)
   do {
     try {
-      $res = Invoke-RestMethod -Uri "$baseUrl/healthz" -Method GET -TimeoutSec 3
-      if ($res.ok -eq $true) {
-        Write-Host "Service healthy. Device:" $res.device
+      $res = Invoke-RestMethod -Uri "$baseUrl/health" -Method GET -TimeoutSec 3
+      if ($res -eq 'ok') {
+        Write-Host "Service healthy (GPU)."
         break
       }
     } catch { Start-Sleep -Seconds 3 }
