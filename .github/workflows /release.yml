@@ -1,0 +1,66 @@
+name: Release to GHCR
+
+on:
+  push:
+    tags: ["v*.*.*"]          # e.g. v0.1.0
+  workflow_dispatch: {}       # allow manual runs
+
+concurrency:
+  group: ghcr-release-${{ github.ref || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set vars (version + image)
+        id: vars
+        shell: bash
+        run: |
+          # owner in lowercase (GHCR needs it)
+          OWNER_LC=$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')
+
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"        # use the tag, strip leading v
+          else
+            # manual run: use run number + short sha
+            VERSION="0.0.${GITHUB_RUN_NUMBER}-${GITHUB_SHA::7}"
+          fi
+
+          echo "owner_lc=$OWNER_LC" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/$OWNER_LC/asr_ocr" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build & Push (CPU)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ${{ steps.vars.outputs.image }}:${{ steps.vars.outputs.version }}
+            ${{ steps.vars.outputs.image }}:latest
+          labels: |
+            org.opencontainers.image.title=asr_ocr
+            org.opencontainers.image.version=${{ steps.vars.outputs.version }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=registry,ref=${{ steps.vars.outputs.image }}:buildcache
+          cache-to: type=registry,ref=${{ steps.vars.outputs.image }}:buildcache,mode=max
