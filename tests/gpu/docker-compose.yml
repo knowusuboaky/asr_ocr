@@ -1,19 +1,25 @@
 services:
-  embeddings:
-    image: ghcr.io/knowusuboaky/unified_embeddings:cuda
+  asr_ocr:
+    image: ghcr.io/knowusuboaky/asr_ocr:cuda
     deploy:
       resources:
         reservations:
           devices:
             - capabilities: [gpu]
     ports:
-      - "9005:9005"
+      - "9002:9002"
     environment:
       - HF_HOME=/root/.cache/huggingface
+      - TRANSFORMERS_CACHE=/root/.cache/huggingface
+      # Optional tuning:
+      # - ASR_MODEL=large-v3
+      # - OCR_LANGS=en
     volumes:
-      - hf-cache:/root/.cache/huggingface
+      - hf-cache:/root/.cache/huggingface   # faster-whisper / HF cache
+      - easyocr-cache:/root/.EasyOCR        # EasyOCR model cache
     restart: unless-stopped
     pull_policy: if_not_present
 
 volumes:
   hf-cache:
+  easyocr-cache:
