@@ -12,24 +12,25 @@ param(
 
 $ErrorActionPreference = "Stop"
 $compose = "docker compose -f tests/cpu/docker-compose.yml"
+$baseUrl = "http://localhost:9002"   # asr_ocr runs on 9002
 
 if ($Action -eq 'up') {
   # Start container (detached)
   iex "$compose up -d"
 
-  # Wait until /healthz returns ok:true (max ~5 min)
+  # Wait until /health returns 'ok' (max ~5 min)
   $deadline = (Get-Date).AddMinutes(5)
   do {
     try {
-      $res = Invoke-RestMethod -Uri "http://localhost:9005/healthz" -Method GET -TimeoutSec 3
-      if ($res.ok -eq $true) {
-        Write-Host "Service healthy. Device:" $res.device
+      $res = Invoke-RestMethod -Uri "$baseUrl/health" -Method GET -TimeoutSec 3
+      if ($res -eq 'ok') {
+        Write-Host "Service healthy."
         break
       }
     } catch { Start-Sleep -Seconds 3 }
   } while ((Get-Date) -lt $deadline)
 
-  Write-Host "Ready. API at http://localhost:9005"
+  Write-Host "Ready. API at $baseUrl"
 }
 elseif ($Action -eq 'down') {
   iex "$compose down -v"
