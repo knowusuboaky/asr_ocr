@@ -185,13 +185,3 @@ uvicorn transcribe_server:app --host 0.0.0.0 --port 9002
 ```
 
 ---
-
-## License
-
-MIT (or your preferred license). Update `LICENSE` accordingly.
-
----
-
-## Maintainer
-
-**@knowusuboaky** — PRs and issues welcome!
