@@ -156,26 +156,43 @@ def transcribe_url(url: str, out_md: Path = Path("transcript_from_url.md"), *, u
 # Ensure your server is running, e.g.:
 #  uvicorn transcribe_server:app --host 0.0.0.0 --port 9002
 
-# Examples:
-ok = transcribe_file(Path("video.mp4"), Path("video_transcript.md"))
+from pathlib import Path
+
+# Resolve paths relative to this script:
+SCRIPT_DIR = Path(__file__).resolve().parent           # .../tests/post_service_test
+TESTS_DIR  = SCRIPT_DIR.parent                         # .../tests
+DATA_DIR   = TESTS_DIR / "tests-data"                  # .../tests/tests-data
+OUT_DIR    = DATA_DIR / "output-data"                  # .../tests/tests-data/output-data
+OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# Local files
+ok = transcribe_file(DATA_DIR / "video.mp4", OUT_DIR / "video_transcript.md")
 print("file->md:", "OK" if ok else "FAILED")
 
-ok = transcribe_image(Path("example.png"), Path("example_ocr.md"))
+ok = transcribe_file(DATA_DIR / "male.wav", OUT_DIR / "male.md")
+print("file->md:", "OK" if ok else "FAILED")
+
+ok = transcribe_image(DATA_DIR / "example.png", OUT_DIR / "example_ocr.md")
 print("image->md:", "OK" if ok else "FAILED")
 
 # Direct media URL (audio/video):
-ok = transcribe_url("https://download.samplelib.com/mp4/sample-5s.mp4", Path("remote_media.md"))
+ok = transcribe_url("https://download.samplelib.com/mp4/sample-5s.mp4", OUT_DIR / "remote_media.md")
 print("url(media)->md:", "OK" if ok else "FAILED")
 
 # Direct image URL:
-ok = transcribe_url("https://upload.wikimedia.org/wikipedia/commons/8/81/Stop_sign.png",
-                    Path("remote_image_ocr.md"))
+ok = transcribe_url(
+    "https://upload.wikimedia.org/wikipedia/commons/8/81/Stop_sign.png",
+    OUT_DIR / "remote_image_ocr.md",
+)
 print("url(image)->md:", "OK" if ok else "FAILED")
 
 # Single HTML page (no crawl) — extracts page text into Markdown:
-ok = transcribe_url("https://www.python.org", Path("python_org.md"))
+ok = transcribe_url("https://www.python.org", OUT_DIR / "python_org.md")
 print("url(html)->md:", "OK" if ok else "FAILED")
 
 # Optional: custom user-agent if a site blocks default:
-ok = transcribe_url("https://example.com/some-media", Path("custom_ua.md"))
+ok = transcribe_url(
+    "https://example.com/some-media",
+    OUT_DIR / "custom_ua.md",
+)
 print("url(with UA)->md:", "OK" if ok else "FAILED")
