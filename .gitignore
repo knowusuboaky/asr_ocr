@@ -1,0 +1,3 @@
+.venv
+tests/post_service_test/
+tests/tests-data/

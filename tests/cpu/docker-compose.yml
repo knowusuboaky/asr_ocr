@@ -1,20 +1,37 @@
+version: "3.9"
+
 services:
   asr_ocr:
-    image: ghcr.io/knowusuboaky/asr_ocr:latest   # CPU image
+    image: ghcr.io/knowusuboaky/asr_ocr:latest
+    container_name: asr_ocr
+    restart: unless-stopped
+    pull_policy: always
     ports:
       - "9002:9002"
     environment:
-      - HF_HOME=/root/.cache/huggingface         # Hugging Face cache
+      - TZ=America/St_Johns
+      # HF / Transformers caches (Florence-2, etc.)
+      - HF_HOME=/root/.cache/huggingface
       - TRANSFORMERS_CACHE=/root/.cache/huggingface
-      # Optional tuning:
+      # Optional tuning (uncomment to pin)
       # - ASR_MODEL=large-v3
       # - OCR_LANGS=en
+      # - VLM_MODEL_ID=microsoft/Florence-2-large
+      # - VLM_MAX_TOKENS=768
+      # Outbound fetch UA for /transcribe_url
+      - FETCH_UA=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36
     volumes:
-      - hf-cache:/root/.cache/huggingface        # faster-whisper / HF cache
-      - easyocr-cache:/root/.EasyOCR             # EasyOCR model cache
-    restart: unless-stopped
-    pull_policy: if_not_present
+      - hf-cache:/root/.cache/huggingface
+      - ctranslate2-cache:/root/.cache/ctranslate2
+      - paddle-cache:/root/.paddleocr
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9002/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
 volumes:
   hf-cache:
-  easyocr-cache:
+  ctranslate2-cache:
+  paddle-cache:

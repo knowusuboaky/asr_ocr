@@ -148,6 +148,31 @@ def transcribe_url(url: str, out_md: Path = Path("transcript_from_url.md"), *, u
     _save_text(out_md, r.text)
     return True
 
+# -------------------- Extract documents (PDF/DOCX/PPTX/TXT/CSV/XLSX) --------------------
+
+def extract_document(doc_path: Path, out_md: Path = Path("document.md"), **opts) -> bool:
+    """
+    Send a local document to /extract_document → Markdown.
+
+    Supports: .pdf, .docx, .pptx, .txt, .csv, .xlsx
+
+    Optional keyword args (sent as query params): ocr, lang, dpi, ocr_threshold,
+    vlm, vlm_model, vlm_max_tokens, vlm_prompt, caption_pages, vlm_dpi,
+    image_columns, fetch_http, image_root, caption_xlsx_charts, soffice_bin, max_rows.
+    """
+    data = doc_path.read_bytes()
+    # Build querystring from **opts without touching any existing helpers
+    if opts:
+        from urllib.parse import urlencode
+        qs = "?" + urlencode(opts, doseq=True)
+    else:
+        qs = ""
+    r = _post_bytes(f"{API_BASE}/extract_document{qs}", data, doc_path.name)
+    if r is None:
+        return False
+    _save_text(out_md, r.text)
+    return True
+
 # -------------------- Quick examples (comment out if importing) --------------------
 # Ensure your server is running, e.g.:
 # uvicorn transcribe_server:app --host 0.0.0.0 --port 9002
@@ -175,6 +200,9 @@ print("file->md:", "OK" if ok else "FAILED")
 ok = transcribe_image(DATA_DIR / "example.png", OUT_DIR / "example_ocr.md")
 print("image->md:", "OK" if ok else "FAILED")
 
+ok = transcribe_image(DATA_DIR / "meme.png", OUT_DIR / "meme.md")
+print("image->md:", "OK" if ok else "FAILED")
+
 # Direct media URL (audio/video):
 ok = transcribe_url("https://download.samplelib.com/mp4/sample-5s.mp4", OUT_DIR / "remote_media.md")
 print("url(media)->md:", "OK" if ok else "FAILED")
@@ -196,3 +224,42 @@ ok = transcribe_url(
     OUT_DIR / "custom_ua.md",
 )
 print("url(with UA)->md:", "OK" if ok else "FAILED")
+
+# --- Local document extracts via /extract_document ---
+ok = extract_document(DATA_DIR / "report.pdf", OUT_DIR / "report_pdf.md", ocr="paddle", lang="en", caption_pages=True)
+print("doc(local pdf)->md:", "OK" if ok else "FAILED")
+
+ok = extract_document(DATA_DIR / "resumer.docx", OUT_DIR / "resumer_docx.md")
+print("doc(local docx)->md:", "OK" if ok else "FAILED")
+
+ok = extract_document(DATA_DIR / "legacy.doc", OUT_DIR / "legacy_doc.md")
+print("doc(local doc)->md:", "OK" if ok else "FAILED")
+
+ok = extract_document(DATA_DIR / "h2o_doc.pptx", OUT_DIR / "h2o_doc_pptx.md")
+print("doc(local pptx)->md:", "OK" if ok else "FAILED")
+
+ok = extract_document(DATA_DIR / "jira.csv", OUT_DIR / "jira_csv.md", max_rows=25)
+print("doc(local csv)->md:", "OK" if ok else "FAILED")
+
+ok = extract_document(DATA_DIR / "sales.xlsx", OUT_DIR / "sales_xlsx.md", caption_xlsx_charts=True)
+print("doc(local xlsx)->md:", "OK" if ok else "FAILED")
+
+# --- URL documents via /transcribe_url (now routes to the document ingester) ---
+ok = transcribe_url(
+    "https://proceedings.neurips.cc/paper_files/paper/2017/file/3f5ee243547dee91fbd053c1c4a845aa-Paper.pdf",
+    OUT_DIR / "remote_pdf.md",
+)
+print("url(pdf)->md:", "OK" if ok else "FAILED")
+
+ok = transcribe_url(
+    "https://people.sc.fsu.edu/~jburkardt/data/csv/airtravel.csv",
+    OUT_DIR / "remote_csv.md",
+)
+print("url(csv)->md:", "OK" if ok else "FAILED")
+
+ok = transcribe_url(
+    "https://filesamples.com/samples/document/docx/sample1.docx",
+    OUT_DIR / "remote_docx.md",
+)
+print("url(docx)->md:", "OK" if ok else "FAILED")
+
