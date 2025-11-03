@@ -12,6 +12,7 @@ services:
       - TZ=America/St_Johns
       # HF / Transformers caches (Florence-2, etc.)
       - HF_HOME=/root/.cache/huggingface
+      - HF_HUB_CACHE=/root/.cache/huggingface
       - TRANSFORMERS_CACHE=/root/.cache/huggingface
       # Optional tuning (uncomment to pin)
       # - ASR_MODEL=large-v3

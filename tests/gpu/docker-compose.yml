@@ -12,6 +12,7 @@ services:
     environment:
       - TZ=America/St_Johns
       - HF_HOME=/root/.cache/huggingface
+      - HF_HUB_CACHE=/root/.cache/huggingface
       - TRANSFORMERS_CACHE=/root/.cache/huggingface
       # - ASR_MODEL=large-v3
       # - OCR_LANGS=en
