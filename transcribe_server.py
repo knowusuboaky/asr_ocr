@@ -35,19 +35,59 @@
 from __future__ import annotations
 
 # ======================================================
-# IMPORTS &  GLOBAL CONFIGS (UPDATED: guarded + lazy)
+# IMPORTS & GLOBAL CONFIG (guarded + lazy)
 # ======================================================
 
 # --- Standard library ---
-import os, math, tempfile, subprocess, io, re, unicodedata, textwrap, hashlib, json, pathlib, shutil
-import datetime
+import os, math, tempfile, subprocess, io, re, unicodedata, textwrap, hashlib, json
+import pathlib, shutil, sys, types, threading, datetime
 from pathlib import Path
 from io import BytesIO
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-# --- Concurrency (for lazy model init) ---
-import threading
+# --- must be at the very top, before any transformers import ---
+os.environ.setdefault("HF_USE_FLASH_ATTENTION_2", "0")  # disable FA2 by default
 
+def _install_flash_attn_stubs():
+    """
+    Provide importable 'flash_attn' packages with a valid __spec__/__path__ so
+    importlib introspection doesn't crash on CPU-only systems.
+    """
+    import importlib.util as _iu
+
+    def _stub(name: str, is_pkg: bool = False):
+        m = sys.modules.get(name) or types.ModuleType(name)
+        # minimal but well-formed module metadata
+        m.__file__ = f"<stub {name}>"
+        m.__package__ = name.rpartition(".")[0]
+        if is_pkg:
+            # mark as a package so submodules import cleanly
+            m.__path__ = []  # type: ignore[attr-defined]
+        m.__spec__ = _iu.spec_from_loader(name, loader=None)
+        sys.modules[name] = m
+        return m
+
+    pkg = _stub("flash_attn", is_pkg=True)
+    bert = _stub("flash_attn.bert_padding")
+    ops  = _stub("flash_attn.ops")
+    _stub("flash_attn.flash_attn_interface")
+
+    # Optional no-op symbols (won't be called when we use eager attention)
+    def _noimpl(*a, **k):
+        raise RuntimeError("flash_attn is stubbed (CPU fallback).")
+    if not hasattr(bert, "pad_input"):   setattr(bert, "pad_input", _noimpl)
+    if not hasattr(bert, "unpad_input"): setattr(bert, "unpad_input", _noimpl)
+    if not hasattr(ops,  "flash_attn_varlen_qkvpacked_func"):
+        setattr(ops, "flash_attn_varlen_qkvpacked_func", _noimpl)
+
+# Only now import HF after disabling flash-attn; if it still complains, add stubs then retry.
+try:
+    from transformers import AutoModelForCausalLM, AutoProcessor
+except Exception:
+    _install_flash_attn_stubs()
+    from transformers import AutoModelForCausalLM, AutoProcessor
+
+    
 # --- Networking / HTTP ---
 import httpx
 from httpx import ConnectError
@@ -55,6 +95,8 @@ from httpx import ConnectError
 # --- FastAPI & schema ---
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import PlainTextResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+
 from pydantic import BaseModel
 
 # --- ASR: faster-whisper + ffmpeg ---
@@ -65,7 +107,6 @@ from imageio_ffmpeg import get_ffmpeg_exe
 import numpy as np
 from PIL import Image
 import torch
-from transformers import AutoProcessor, AutoModelForCausalLM
 
 # Guard Paddle imports (optional dependency)
 try:
@@ -139,6 +180,12 @@ try:
 except Exception:
     rtf_to_text = None
 
+# --- HF snapshot (optional) ---
+try:
+    from huggingface_hub import snapshot_download
+except Exception:
+    snapshot_download = None  # type: ignore
+
 # ------------------------------------------------------
 # ASR CONFIG & DEVICE / PRECISION
 # ------------------------------------------------------
@@ -147,33 +194,167 @@ VAD_MIN_SIL_MS = int(os.getenv("VAD_MIN_SIL_MS", "500"))
 KEEP_WAV = os.getenv("KEEP_WAV", "false").lower() == "true"
 KEEP_WAV_ON_ERROR = os.getenv("KEEP_WAV_ON_ERROR", "true").lower() == "true"
 
+# Root for all local model snapshots (default: ./models next to this script)
+MODELS_ROOT = os.getenv("MODELS_ROOT", str(Path.cwd() / "models"))
+Path(MODELS_ROOT).mkdir(parents=True, exist_ok=True)
+
 # ------------------ Florence-2 (primary VLM OCR + caption) ------------------
+
+# Model selection
 VLM_MODEL_ID = os.getenv("VLM_MODEL_ID", "microsoft/Florence-2-large")
+
+# Optional absolute/host-mounted path to a pre-downloaded model dir (highest priority)
+FLORENCE_LOCAL_DIR = os.getenv("FLORENCE_LOCAL_DIR")  # e.g., "/models/florence2"
+
+# Single control knob
+FLORENCE_ALLOW_DOWNLOAD = os.getenv("FLORENCE_ALLOW_DOWNLOAD", "").lower() == "true"
+FLORENCE_REVISION = os.getenv("FLORENCE_REVISION", "main")
+
+# Snapshot location is derived from the model id (…/models/<last-segment>)
+def _default_florence_snapshot_dir(model_id: str) -> Path:
+    slug = (model_id.split("/")[-1] or "florence2-large").strip().replace(" ", "_")
+    return Path(MODELS_ROOT) / slug
+
+FLORENCE_SNAPSHOT_DIR = Path(
+    os.getenv("FLORENCE_SNAPSHOT_DIR", str(_default_florence_snapshot_dir(VLM_MODEL_ID)))
+)
+
 # Extreme-detailed caption tweaks
 VLM_CAPTION_TASK = os.getenv("VLM_CAPTION_TASK", "<MORE_DETAILED_CAPTION>")
 VLM_MAX_TOKENS_CAPTION = int(os.getenv("VLM_MAX_TOKENS_CAPTION", "768"))   # try 512–1024
 VLM_REGION_CAPTION_TOPK = int(os.getenv("VLM_REGION_CAPTION_TOPK", "5"))   # caption top-N regions by area
 
-FLORENCE_DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
-FLORENCE_DTYPE = torch.float16 if torch.cuda.is_available() else torch.float32
+def _parse_dtype(name: str):
+    name = (name or "").lower()
+    if name in ("fp16", "float16"): return torch.float16
+    if name in ("bf16", "bfloat16"): return torch.bfloat16
+    return torch.float32
+
+FLORENCE_DEVICE = os.getenv("FLORENCE_DEVICE") or ("cuda:0" if torch.cuda.is_available() else "cpu")
+FLORENCE_DTYPE  = _parse_dtype(os.getenv("FLORENCE_DTYPE") or ("float16" if torch.cuda.is_available() else "float32"))
 
 # Lazy-loaded Florence singletons
 _FLORENCE_LOCK = threading.Lock()
 _FLORENCE_MODEL: Optional[AutoModelForCausalLM] = None
 _FLORENCE_PROCESSOR: Optional[AutoProcessor] = None
+_FLORENCE_LAST_ERROR: Optional[str] = None  # <-- debug surface
+
+def _ensure_florence_path() -> Tuple[str, bool]:
+    """
+    Decide and prepare the source path for Florence, returning (source, is_local_path).
+
+    Precedence:
+      1) FLORENCE_LOCAL_DIR (if provided and non-empty)
+      2) Snapshot dir (FLORENCE_SNAPSHOT_DIR):
+           - If exists: use it
+           - If missing:
+               * If FLORENCE_ALLOW_DOWNLOAD=true → snapshot_download, then use it
+               * If FLORENCE_ALLOW_DOWNLOAD=false → snapshot_download anyway (warn loudly), then use it
+      3) If snapshot download not possible (e.g., no huggingface_hub), fall back to repo id
+         (Transformers may download to HF cache).
+    """
+    import warnings
+
+    def _warn(msg: str):
+        try:
+            warnings.warn(msg)
+        finally:
+            try:
+                print(f"[florence2][snapshot] WARNING: {msg}", file=sys.stderr, flush=True)
+            except Exception:
+                pass
+
+    # 1) Pre-mounted local dir
+    if FLORENCE_LOCAL_DIR:
+        p = Path(FLORENCE_LOCAL_DIR)
+        if p.exists() and any(p.rglob("*")):
+            return str(p), True
+
+    # 2) Snapshot dir
+    snap = FLORENCE_SNAPSHOT_DIR
+    if snap.exists() and any(snap.rglob("*")):
+        return str(snap), True
+
+    # Snapshot missing → we will create/populate it
+    if not FLORENCE_ALLOW_DOWNLOAD:
+        _warn(
+            f"No local snapshot found at '{snap}'. FLORENCE_ALLOW_DOWNLOAD=false, "
+            f"but proceeding with a one-time download to populate the local cache."
+        )
+
+    if snapshot_download is not None:
+        try:
+            snap.parent.mkdir(parents=True, exist_ok=True)
+            snapshot_download(
+                repo_id=VLM_MODEL_ID,
+                revision=FLORENCE_REVISION,
+                local_dir=str(snap),
+                local_dir_use_symlinks=False,
+            )
+            return str(snap), True
+        except Exception as e:
+            _warn(f"{type(e).__name__}: {e}. Falling back to repo id '{VLM_MODEL_ID}'.")
+    else:
+        _warn("huggingface_hub not installed; cannot snapshot. Falling back to repo id.")
+
+    # 3) Fall back to repo id (Transformers may download via standard cache)
+    return VLM_MODEL_ID, False
 
 def _get_florence() -> Tuple[Optional[AutoModelForCausalLM], Optional[AutoProcessor]]:
-    """Thread-safe lazy loader for Florence model/processor."""
-    global _FLORENCE_MODEL, _FLORENCE_PROCESSOR
+    """
+    Thread-safe lazy loader for Florence with CPU-safe attention (no flash-attn).
+    - Chooses `attn_implementation` based on device (override via VLM_ATTN_IMPL).
+    - If a remote modeling file tries to import flash_attn, we stub it and retry.
+    """
+    global _FLORENCE_MODEL, _FLORENCE_PROCESSOR, _FLORENCE_LAST_ERROR
     if _FLORENCE_MODEL is not None and _FLORENCE_PROCESSOR is not None:
         return _FLORENCE_MODEL, _FLORENCE_PROCESSOR
+
+    # Choose an attention impl that never requires flash-attn on CPU.
+    default_impl = "eager" if str(FLORENCE_DEVICE).startswith("cpu") else "sdpa"
+    ATTN_IMPL = os.getenv("VLM_ATTN_IMPL", default_impl)
+
     with _FLORENCE_LOCK:
         if _FLORENCE_MODEL is None or _FLORENCE_PROCESSOR is None:
-            _FLORENCE_MODEL = AutoModelForCausalLM.from_pretrained(
-                VLM_MODEL_ID, torch_dtype=FLORENCE_DTYPE, trust_remote_code=True
-            ).to(FLORENCE_DEVICE)
-            _FLORENCE_PROCESSOR = AutoProcessor.from_pretrained(VLM_MODEL_ID, trust_remote_code=True)
+            try:
+                source, is_local = _ensure_florence_path()
+
+                def _load(attn_impl: str):
+                    model = AutoModelForCausalLM.from_pretrained(
+                        source,
+                        torch_dtype=FLORENCE_DTYPE,
+                        trust_remote_code=True,
+                        local_files_only=bool(is_local),
+                        revision=(FLORENCE_REVISION if not is_local else None),
+                        attn_implementation=attn_impl,   # ← key line: avoid flash-attn
+                    ).to(FLORENCE_DEVICE)
+                    proc = AutoProcessor.from_pretrained(
+                        source,
+                        trust_remote_code=True,
+                        local_files_only=bool(is_local),
+                        revision=(FLORENCE_REVISION if not is_local else None),
+                    )
+                    return model, proc
+
+                try:
+                    _FLORENCE_MODEL, _FLORENCE_PROCESSOR = _load(ATTN_IMPL)  # uses attn_implementation
+                    _FLORENCE_LAST_ERROR = None
+                except Exception as e:
+                    msg = f"{type(e).__name__}: {e}"
+                    if "flash_attn" in msg.lower():
+                        _install_flash_attn_stubs()
+                        _FLORENCE_MODEL, _FLORENCE_PROCESSOR = _load("eager")
+                        _FLORENCE_LAST_ERROR = None
+                    else:
+                        raise
+
+            except Exception as e:
+                _FLORENCE_MODEL = None
+                _FLORENCE_PROCESSOR = None
+                _FLORENCE_LAST_ERROR = f"{type(e).__name__}: {e}"
+
     return _FLORENCE_MODEL, _FLORENCE_PROCESSOR
+
 
 # ------------------ PaddleOCR (fallback OCR) ------------------
 _PADDLE: Optional["PaddleOCR"] = None
@@ -199,11 +380,27 @@ def _paddle_gpu_available() -> bool:
 
 PADDLE_USE_GPU = _paddle_gpu_available()
 
-# ===========================================================================================================
 
-# ======================================================
-# STEP 2 — HELPERS & EXTRACTORS
-# ======================================================
+# ------------------ faster-whisper snapshot (ASR) ------------------
+
+# Ensure MODELS_ROOT exists (default: ./models next to this script)
+try:
+    MODELS_ROOT  # type: ignore[name-defined]
+except NameError:
+    MODELS_ROOT = os.getenv("MODELS_ROOT", str(Path.cwd() / "models"))
+    Path(MODELS_ROOT).mkdir(parents=True, exist_ok=True)
+
+# Make sure snapshot_download is available (graceful if not installed)
+try:
+    snapshot_download  # type: ignore[name-defined]
+except NameError:
+    try:
+        from huggingface_hub import snapshot_download  # pip install huggingface_hub
+    except Exception:
+        snapshot_download = None  # type: ignore[assignment]
+
+# Default model SIZE → faster-whisper-large-v3
+MODEL_SIZE = os.getenv("ASR_MODEL", "large-v3")  # ← default
 
 def detect_device_and_precision():
     """Pick device & precision for faster-whisper (CUDA → float16, else CPU int8_float32)."""
@@ -217,7 +414,137 @@ def detect_device_and_precision():
     return "cpu", "int8_float32"
 
 DEVICE, COMPUTE_TYPE = detect_device_and_precision()
-ASR_MODEL = WhisperModel(MODEL_SIZE, device=DEVICE, compute_type=COMPUTE_TYPE)
+
+# Single control knob (snapshot semantics)
+WHISPER_ALLOW_DOWNLOAD = os.getenv("WHISPER_ALLOW_DOWNLOAD", "false").lower() == "true"
+WHISPER_REVISION = os.getenv("WHISPER_REVISION", "main")
+
+# Optional absolute/host-mounted local dir (highest priority)
+WHISPER_LOCAL_DIR = os.getenv("WHISPER_LOCAL_DIR")  # e.g., "/models/faster-whisper-large-v3"
+
+# Snapshot dir under ./models/faster-whisper-<MODEL_SIZE> by default
+WHISPER_SNAPSHOT_DIR = Path(os.getenv(
+    "WHISPER_SNAPSHOT_DIR",
+    str(Path(MODELS_ROOT) / f"faster-whisper-{MODEL_SIZE}")
+))
+
+# Map common sizes to their repo ids (default path resolves to Systran/faster-whisper-<size>)
+WHISPER_REPO_BY_SIZE = {
+    "large-v3": "Systran/faster-whisper-large-v3",
+    # "large-v2": "Systran/faster-whisper-large-v2",
+    # "distil-large-v3": "Systran/faster-distil-whisper-large-v3",
+    # "medium": "Systran/faster-whisper-medium",
+    # "medium.en": "Systran/faster-whisper-medium.en",
+    # "small": "Systran/faster-whisper-small",
+    # "small.en": "Systran/faster-whisper-small.en",
+    # "base": "Systran/faster-whisper-base",
+    # "base.en": "Systran/faster-whisper-base.en",
+    # "tiny": "Systran/faster-whisper-tiny",
+    # "tiny.en": "Systran/faster-whisper-tiny.en",
+}
+
+_WHISPER_SNAPSHOT_LAST_ERROR: Optional[str] = None
+
+def _ensure_whisper_path(model_size: str) -> Optional[str]:
+    """
+    Decide and prepare the source path for faster-whisper; return a local path if available,
+    else None to let WhisperModel resolve by repo id.
+    """
+    import sys, warnings
+
+    def _warn(msg: str):
+        try:
+            warnings.warn(msg)
+        except Exception:
+            pass
+        try:
+            print(f"[faster-whisper][snapshot] WARNING: {msg}", file=sys.stderr, flush=True)
+        except Exception:
+            pass
+
+    global _WHISPER_SNAPSHOT_LAST_ERROR
+
+    # 1) Pre-mounted local dir
+    if WHISPER_LOCAL_DIR:
+        p = Path(WHISPER_LOCAL_DIR)
+        if p.exists() and any(p.rglob("*")):
+            return str(p)
+
+    # 2) Snapshot dir
+    snap = WHISPER_SNAPSHOT_DIR
+    if snap.exists() and any(snap.rglob("*")):
+        return str(snap)
+
+    # Snapshot missing → we will create/populate it
+    if not WHISPER_ALLOW_DOWNLOAD:
+        _warn(
+            f"No local snapshot found at '{snap}'. WHISPER_ALLOW_DOWNLOAD=false, "
+            f"but proceeding with a one-time download to populate the local cache."
+        )
+
+    if snapshot_download is None:
+        _WHISPER_SNAPSHOT_LAST_ERROR = "huggingface_hub not installed; cannot snapshot faster-whisper."
+        _warn(_WHISPER_SNAPSHOT_LAST_ERROR)
+        return None
+
+    try:
+        repo_id = WHISPER_REPO_BY_SIZE.get(model_size, f"Systran/faster-whisper-{model_size}")
+        snap.parent.mkdir(parents=True, exist_ok=True)
+        snapshot_download(
+            repo_id=repo_id,
+            revision=WHISPER_REVISION,
+            local_dir=str(snap),
+            local_dir_use_symlinks=False,
+        )
+        return str(snap)
+    except Exception as e:
+        _WHISPER_SNAPSHOT_LAST_ERROR = f"{type(e).__name__}: {e}"
+        _warn(_WHISPER_SNAPSHOT_LAST_ERROR)
+        return None
+
+# Prefer local snapshot path; fall back to the model name
+try:
+    _whisper_src = _ensure_whisper_path(MODEL_SIZE)
+except Exception:
+    _whisper_src = None  # fallback path
+
+# --- Lazy Whisper loader (replaces global ASR_MODEL) ---
+_ASR_MODEL = None
+
+def _get_asr_model():
+    global _ASR_MODEL
+    if _ASR_MODEL is None:
+        # Re-detect to be safe at first use (GPU vs CPU)
+        device, compute_type = detect_device_and_precision()
+        src = _whisper_src or MODEL_SIZE
+        _ASR_MODEL = WhisperModel(src, device=device, compute_type=compute_type)
+    return _ASR_MODEL
+
+WHISPER_SNAPSHOT_ENABLED = bool(_whisper_src)  # True if we’re using a local snapshot dir
+
+# Force default ON unless explicitly disabled via env (EAGER_SNAPSHOT_WARMUP=false)
+os.environ.setdefault("EAGER_SNAPSHOT_WARMUP", "true")
+
+# ---- EAGER SNAPSHOT WARMUP (import-time, optional) -------------------------
+# Ensures local snapshot folders exist; does NOT load models into memory.
+# Guarded so uvicorn --reload / multiple imports don’t run it twice.
+if os.getenv("EAGER_SNAPSHOT_WARMUP", "true").lower() == "true" and not globals().get("_WARMUP_DONE"):
+    globals()["_WARMUP_DONE"] = True
+    try:
+        _ = _ensure_whisper_path(MODEL_SIZE)
+    except Exception:
+        pass
+    try:
+        _ = _ensure_florence_path()
+    except Exception:
+        pass
+# ---------------------------------------------------------------------------
+
+# ===========================================================================================================
+
+# ======================================================
+# STEP 2 — HELPERS & EXTRACTORS
+# ======================================================
 
 # ------------------------------------------------------
 # GENERIC HELPERS (HASH / TIME)
@@ -1694,7 +2021,8 @@ def ffmpeg_convert_to_wav(input_media: Path, output_wav: Path):
 
 def asr_transcribe_wav(wav_path: Path):
     """Transcribe a WAV file with faster-whisper using VAD; return (segments, info)."""
-    segments, info = ASR_MODEL.transcribe(
+    model = _get_asr_model()
+    segments, info = model.transcribe(
         str(wav_path),
         vad_filter=True,
         vad_parameters=dict(min_silence_duration_ms=VAD_MIN_SIL_MS),
@@ -2535,8 +2863,54 @@ def mdify_ingest_process_to_markdown(path: str, *,
 app = FastAPI(
     title="Unified ASR/OCR & Document Ingest Server",
     version="0.1",
-    docs_url="/__docs__"
+    docs_url="/__docs__",
+    openapi_url="/openapi.json",   # explicit is nice for proxies
 )
+
+# NEW – permissive for local dev; tighten in prod
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],           # e.g. ["http://localhost:3000"]
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ---- Preload models before the app starts serving ----
+@app.on_event("startup")
+def _preload_models():
+    import time
+    if os.getenv("PRELOAD_MODELS", "true").lower() != "true":
+        print("[startup] PRELOAD_MODELS=false → skipping preloads.", flush=True)
+        return
+
+    # 1) Whisper first
+    t0 = time.time()
+    try:
+        _ = _get_asr_model()  # instantiates WhisperModel once
+        dt = time.time() - t0
+        print(f"[startup] Whisper ready ({DEVICE},{COMPUTE_TYPE}) in {dt:.1f}s", flush=True)
+    except Exception as e:
+        print(f"[startup] Whisper preload FAILED: {e}", file=sys.stderr, flush=True)
+
+    # 2) Florence next (snapshot + model+processor)
+    t1 = time.time()
+    try:
+        try:
+            _ = _ensure_florence_path()  # make sure local snapshot exists
+        except Exception:
+            pass
+
+        m, p = _get_florence()
+        dt = time.time() - t1
+        if m and p:
+            dtype = str(FLORENCE_DTYPE).replace("torch.", "")
+            print(f"[startup] Florence ready ({FLORENCE_DEVICE},{dtype}) in {dt:.1f}s", flush=True)
+        else:
+            print(f"[startup] Florence preload SKIPPED — last_error={_FLORENCE_LAST_ERROR}", file=sys.stderr, flush=True)
+    except Exception as e:
+        print(f"[startup] Florence preload FAILED: {e}", file=sys.stderr, flush=True)
+
 
 # ---------- Friendly error handler ----------
 @app.exception_handler(HTTPException)
@@ -2598,6 +2972,43 @@ def root():
         f"[langs={','.join(OCR_LANGS)}] | "
         f"URL: single-page extract + yt-dlp media"
     )
+
+@app.get("/__vlm_status")
+def __vlm_status():
+    try:
+        m, p = _get_florence()
+        ok = bool(m and p)
+    except Exception as e:
+        ok = False
+    return JSONResponse({
+        "enabled": ok,
+        "model_id": VLM_MODEL_ID,
+        "local_dir": FLORENCE_LOCAL_DIR,
+        "device": FLORENCE_DEVICE,
+        "dtype": str(FLORENCE_DTYPE),
+        "hf_home": os.getenv("HF_HOME") or os.getenv("TRANSFORMERS_CACHE"),
+        "offline": {
+            "TRANSFORMERS_OFFLINE": os.getenv("TRANSFORMERS_OFFLINE"),
+            "HF_HUB_OFFLINE": os.getenv("HF_HUB_OFFLINE"),
+        },
+        "last_error": _FLORENCE_LAST_ERROR,
+    })
+
+@app.get("/__asr_status")
+def __asr_status():
+    return JSONResponse({
+        "model_size": MODEL_SIZE,
+        "device": DEVICE,
+        "compute_type": COMPUTE_TYPE,
+        "snapshot": {
+            "enabled": WHISPER_SNAPSHOT_ENABLED,
+            "dir": str(WHISPER_SNAPSHOT_DIR),
+            "allow_download": WHISPER_ALLOW_DOWNLOAD,
+            "revision": WHISPER_REVISION,
+            "last_error": _WHISPER_SNAPSHOT_LAST_ERROR,
+        },
+    })
+
 
 @app.post("/extract_document")
 async def extract_document(
