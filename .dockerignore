@@ -1,0 +1,9 @@
+/docs
+/__pycache__
+/github/workflows
+*.pyc
+/README.md
+/.gitignore
+/.dockerignore
+/LICENSE
+/tests
