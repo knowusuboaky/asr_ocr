@@ -5,34 +5,43 @@ services:
     image: ghcr.io/knowusuboaky/asr_ocr:latest
     container_name: asr_ocr
     restart: unless-stopped
-    pull_policy: always
     ports:
       - "9002:9002"
-    environment:
-      - TZ=America/St_Johns
-      # HF / Transformers caches (Florence-2, etc.)
-      - HF_HOME=/root/.cache/huggingface
-      - HF_HUB_CACHE=/root/.cache/huggingface
-      - TRANSFORMERS_CACHE=/root/.cache/huggingface
-      # Optional tuning (uncomment to pin)
-      # - ASR_MODEL=large-v3
-      # - OCR_LANGS=en
-      # - VLM_MODEL_ID=microsoft/Florence-2-large
-      # - VLM_MAX_TOKENS=768
-      # Outbound fetch UA for /transcribe_url
-      - FETCH_UA=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36
-    volumes:
-      - hf-cache:/root/.cache/huggingface
-      - ctranslate2-cache:/root/.cache/ctranslate2
-      - paddle-cache:/root/.paddleocr
+    # platform: linux/amd64   # uncomment to pin arch on Apple Silicon, etc.
+
+    # environment:
+    #   # --- Server/runtime ---
+    #   UVICORN_WORKERS: "1"
+    #
+    #   # --- ASR ---
+    #   ASR_MODEL: "large-v3"
+    #   VAD_MIN_SIL_MS: "500"
+    #   KEEP_WAV: "false"
+    #   KEEP_WAV_ON_ERROR: "true"
+    #
+    #   # --- OCR/VLM ---
+    #   OCR_LANGS: "en"
+    #   OCR_UPSCALE: "1.5"
+    #   FLORENCE_MAX_CONCURRENCY: "1"
+    #
+    #   # --- Snapshot/cache behavior (single knobs; baked snapshots preferred) ---
+    #   FLORENCE_ALLOW_DOWNLOAD: "false"
+    #   WHISPER_ALLOW_DOWNLOAD: "false"
+    #
+    #   # --- Optional overrides (defaults already point to baked paths) ---
+    #   FLORENCE_LOCAL_DIR: "/models/hf/Florence-2-large"
+    #   WHISPER_SNAPSHOT_DIR: "/models/hf/faster-whisper-large-v3"
+    #
+    # volumes:
+    #   # WARNING: Mounting here will OVERRIDE baked snapshots inside the image.
+    #   # Use only if you want to manage/cache models on the host.
+    #   - ./models:/models/hf
+    #   # Or use a separate cache dir instead of your repo models:
+    #   # - ./models_cache:/models/hf
+
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9002/health"]
       interval: 30s
       timeout: 5s
       retries: 5
       start_period: 30s
-
-volumes:
-  hf-cache:
-  ctranslate2-cache:
-  paddle-cache:
